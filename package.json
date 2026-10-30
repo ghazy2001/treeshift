@@ -1,0 +1,53 @@
+{
+  "name": "treeshift",
+  "version": "0.1.0",
+  "description": "⚡ Blazing-fast Git worktree manager with auto-sync and interactive TUI",
+  "bin": {
+    "treeshift": "./dist/cli.js",
+    "ts": "./dist/cli.js",
+    "wt": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "bun build src/cli.ts --target=node --outfile=dist/cli.js && bun build src/index.ts --target=node --outfile=dist/index.js",
+    "build:binary": "bun build --compile --minify src/cli.ts --outfile=bin/treeshift",
+    "dev": "bun run src/cli.ts",
+    "test": "vitest run",
+    "prepack": "bun run build"
+  },
+  "keywords": [
+    "git",
+    "worktree",
+    "git-worktree",
+    "cli",
+    "tui",
+    "developer-tools",
+    "productivity",
+    "workflow"
+  ],
+  "author": "Mahmoud Ghazy (https://github.com/ghazy2001)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ghazy2001/treeshift.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ghazy2001/treeshift/issues"
+  },
+  "homepage": "https://github.com/ghazy2001/treeshift#readme",
+  "dependencies": {
+    "@clack/prompts": "^1.8.1",
+    "commander": "^15.0.0",
+    "picocolors": "^1.1.1"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^26.6.6",
+    "vitest": "^5.0.5"
+  }
+}
