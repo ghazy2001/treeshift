@@ -156,7 +156,9 @@ export async function isWorktreeDirty(worktreePath: string): Promise<boolean> {
     const status = await runGit(["status", "--porcelain"], worktreePath);
     return status.length > 0;
   } catch {
-    return false;
+    // Fail-safe: if git check fails (locked, permission error, corrupted index),
+    // treat as dirty to prevent accidental deletion or data loss.
+    return true;
   }
 }
 
@@ -250,17 +252,129 @@ export async function pruneWorktrees(cwd: string = process.cwd()): Promise<void>
   await runGit(["worktree", "prune"], cwd);
 }
 
+/**
+ * Detects whether a branch's changes have been squash-merged into targetBranch.
+ * Synthesizes a temporary commit of the branch's tree on top of the merge-base,
+ * then uses `git cherry` to check if an equivalent patch exists on targetBranch.
+ */
+export async function isBranchSquashMerged(
+  branch: string,
+  targetBranch: string,
+  cwd: string = process.cwd()
+): Promise<boolean> {
+  try {
+    const mergeBase = await runGit(["merge-base", targetBranch, branch], cwd);
+    if (!mergeBase) return false;
+
+    // Get the tree SHA of the branch
+    const tree = await runGit(["rev-parse", `${branch}^{tree}`], cwd);
+    if (!tree) return false;
+
+    // If the tree is identical to mergeBase, branch had no changes or was fast-forwarded/reset
+    const baseTree = await runGit(["rev-parse", `${mergeBase}^{tree}`], cwd);
+    if (tree === baseTree) {
+      return true;
+    }
+
+    // Synthesize a dangling commit representing the squash of the entire branch
+    const syntheticCommit = await runGit(
+      ["commit-tree", tree, "-p", mergeBase, "-m", "_"],
+      cwd
+    );
+    if (!syntheticCommit) return false;
+
+    // Check if an equivalent commit exists on targetBranch
+    // git cherry outputs "- <commit>" if patch is already integrated, "+ <commit>" if not
+    const cherry = await runGit(
+      ["cherry", targetBranch, syntheticCommit],
+      cwd
+    );
+    return cherry.trim().startsWith("-");
+  } catch {
+    return false;
+  }
+}
+
+export interface MergedBranchesResult {
+  merged: string[];
+  squashed: string[];
+  all: string[];
+}
+
 export async function getMergedBranches(
   targetBranch: string,
+  candidateBranches?: string[],
+  cwd: string = process.cwd()
+): Promise<MergedBranchesResult> {
+  const merged: string[] = [];
+  const squashed: string[] = [];
+
+  try {
+    const output = await runGit(["branch", "--merged", targetBranch], cwd);
+    if (output) {
+      const branches = output
+        .split(/\r?\n/)
+        .map((b) => b.replace(/^[*+]\s+/, "").trim())
+        .filter((b) => b && b !== targetBranch && !b.startsWith("("));
+      merged.push(...branches);
+    }
+  } catch {
+    // ignore
+  }
+
+  // Check candidate branches for squash merges
+  if (candidateBranches && candidateBranches.length > 0) {
+    const candidatesToCheck = candidateBranches.filter(
+      (b) => b !== targetBranch && !merged.includes(b)
+    );
+
+    await Promise.all(
+      candidatesToCheck.map(async (branch) => {
+        const isSquashed = await isBranchSquashMerged(branch, targetBranch, cwd);
+        if (isSquashed) {
+          squashed.push(branch);
+        }
+      })
+    );
+  }
+
+  return {
+    merged,
+    squashed,
+    all: Array.from(new Set([...merged, ...squashed])),
+  };
+}
+
+/**
+ * Checks if a branch has commits that have not been pushed to its upstream tracking branch,
+ * or not integrated into the default branch if no upstream is configured.
+ */
+export async function getUnpushedCommits(
+  branch: string,
+  defaultBranch?: string,
   cwd: string = process.cwd()
 ): Promise<string[]> {
   try {
-    const output = await runGit(["branch", "--merged", targetBranch], cwd);
+    let upstream = "";
+    try {
+      upstream = await runGit(
+        ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`],
+        cwd
+      );
+    } catch {
+      // No upstream tracking branch configured
+    }
+
+    const compareRef = upstream || defaultBranch;
+    if (!compareRef) return [];
+
+    const output = await runGit(
+      ["log", `${compareRef}..${branch}`, "--oneline"],
+      cwd
+    );
     if (!output) return [];
-    return output
-      .split(/\r?\n/)
-      .map((b) => b.replace(/^[*+]\s+/, "").trim())
-      .filter((b) => b && b !== targetBranch && !b.startsWith("("));
+
+    return output.split(/\r?\n/).filter(Boolean);
   } catch {
     return [];
   }

@@ -7,6 +7,8 @@ import {
   removeWorktree,
   pruneWorktrees,
   deleteBranch,
+  getDefaultBranch,
+  getUnpushedCommits,
   type WorktreeInfo,
 } from "../core/git.js";
 
@@ -106,8 +108,37 @@ export async function removeCommand(
     }
 
     if (shouldDeleteBranch) {
+      // Check for unpushed / unmerged commits before deleting
+      const defaultBranch = await getDefaultBranch();
+      const unpushed = await getUnpushedCommits(selectedWt.branch, defaultBranch);
+
+      let forceDelete = options.force;
+      if (unpushed.length > 0) {
+        p.log.warn(
+          `Branch ${pc.blue(selectedWt.branch)} has ${pc.yellow(unpushed.length.toString())} unpushed/unmerged commit(s):`
+        );
+        for (const commit of unpushed.slice(0, 3)) {
+          p.log.message(`  ${pc.dim("•")} ${commit}`);
+        }
+        if (unpushed.length > 3) {
+          p.log.message(`  ${pc.dim(`...and ${unpushed.length - 3} more`)}`);
+        }
+
+        const confirmNuke = await p.confirm({
+          message: `Are you sure you want to delete branch ${pc.blue(selectedWt.branch)} and discard these commits?`,
+          initialValue: false,
+        });
+
+        if (p.isCancel(confirmNuke) || !confirmNuke) {
+          p.log.info(`Skipped deleting branch ${pc.blue(selectedWt.branch)}.`);
+          p.outro(pc.green("Worktree removed successfully (branch preserved)."));
+          return;
+        }
+        forceDelete = true;
+      }
+
       try {
-        await deleteBranch(selectedWt.branch, options.force);
+        await deleteBranch(selectedWt.branch, forceDelete);
         p.log.success(`Deleted branch ${pc.blue(selectedWt.branch)}`);
       } catch (err: any) {
         p.log.warn(`Could not delete branch ${selectedWt.branch}: ${err.message}`);

@@ -1,6 +1,6 @@
 {
   "name": "treeshift",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "⚡ Blazing-fast Git worktree manager with auto-sync and interactive TUI",
   "bin": {
     "treeshift": "./dist/cli.js",

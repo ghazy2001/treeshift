@@ -19,18 +19,23 @@ export async function cleanCommand(options: { force?: boolean } = {}): Promise<v
 
   const defaultBranch = await getDefaultBranch();
   const s = p.spinner();
-  s.start(`Scanning for branches merged into ${pc.cyan(defaultBranch)}...`);
+  s.start(`Scanning for worktrees merged into ${pc.cyan(defaultBranch)} (including squash merges)...`);
 
-  const [mergedBranches, worktrees] = await Promise.all([
-    getMergedBranches(defaultBranch),
-    listWorktrees(),
-  ]);
+  const worktrees = await listWorktrees();
+  const candidateBranches = worktrees
+    .filter((wt) => !wt.isMain && wt.branch)
+    .map((wt) => wt.branch as string);
+
+  const { merged, squashed, all } = await getMergedBranches(
+    defaultBranch,
+    candidateBranches
+  );
 
   s.stop(`Scanned ${worktrees.length} worktrees against ${pc.cyan(defaultBranch)}.`);
 
-  // Find worktrees associated with merged branches (exclude main repo)
+  // Find worktrees associated with merged or squashed branches (exclude main repo)
   const candidateWorktrees = worktrees.filter(
-    (wt) => !wt.isMain && wt.branch && mergedBranches.includes(wt.branch)
+    (wt) => !wt.isMain && wt.branch && all.includes(wt.branch)
   );
 
   if (candidateWorktrees.length === 0) {
@@ -38,11 +43,16 @@ export async function cleanCommand(options: { force?: boolean } = {}): Promise<v
     return;
   }
 
-  const choices = candidateWorktrees.map((wt) => ({
-    value: wt.path,
-    label: `${pc.blue(wt.branch!)} ${wt.isDirty ? pc.yellow("[dirty]") : pc.green("[clean]")}`,
-    hint: wt.path,
-  }));
+  const choices = candidateWorktrees.map((wt) => {
+    const isSquashed = squashed.includes(wt.branch!);
+    const mergeTag = isSquashed ? pc.magenta("[squash-merged]") : pc.cyan("[merged]");
+    const dirtyTag = wt.isDirty ? pc.yellow("[dirty]") : pc.green("[clean]");
+    return {
+      value: wt.path,
+      label: `${pc.blue(wt.branch!)} ${mergeTag} ${dirtyTag}`,
+      hint: wt.path,
+    };
+  });
 
   const selectedPaths = await p.multiselect({
     message: `Found ${candidateWorktrees.length} merged worktrees. Select to clean up:`,
@@ -73,7 +83,9 @@ export async function cleanCommand(options: { force?: boolean } = {}): Promise<v
     try {
       await removeWorktree(wtPath, { force: options.force || wt?.isDirty });
       if (shouldDeleteBranches && wt?.branch) {
-        await deleteBranch(wt.branch, false);
+        // Squash-merged branches require -D because git doesn't share ancestry
+        const isSquashed = squashed.includes(wt.branch);
+        await deleteBranch(wt.branch, isSquashed);
       }
       removedCount++;
     } catch (err: any) {
