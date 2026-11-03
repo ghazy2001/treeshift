@@ -18,12 +18,21 @@ export interface TreeshiftConfig {
   envFiles?: string[];
   /** Default base branch to branch off from (default: detected default branch) */
   defaultBaseBranch?: string;
+  /** Automatically install dependencies upon creating a new worktree */
+  autoInstall?: boolean;
+  /** Lifecycle hook commands executed before/after worktree actions */
+  hooks?: {
+    postAdd?: string;
+    preRemove?: string;
+    postSwitch?: string;
+  };
 }
 
 export const DEFAULT_CONFIG: TreeshiftConfig = {
   location: "internal",
   internalDir: ".worktrees",
   syncEnv: true,
+  autoInstall: false,
 };
 
 export function sanitizeBranchName(branch: string): string {
@@ -34,12 +43,13 @@ export function sanitizeBranchName(branch: string): string {
 export function resolveWorktreePath(
   repoRoot: string,
   branch: string,
-  config: TreeshiftConfig = DEFAULT_CONFIG
+  config: TreeshiftConfig = DEFAULT_CONFIG,
+  options: { isBare?: boolean } = {}
 ): string {
   const sanitized = sanitizeBranchName(branch);
   const repoName = path.basename(repoRoot);
 
-  if (config.location === "sibling") {
+  if (options.isBare || config.location === "sibling") {
     const parentDir = path.dirname(repoRoot);
     return path.join(parentDir, `${repoName}-${sanitized}`);
   }

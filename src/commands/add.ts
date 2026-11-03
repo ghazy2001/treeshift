@@ -9,16 +9,27 @@ import {
   listBranches,
   listWorktrees,
   addWorktree,
+  ensureGitignoreEntry,
+  createCarryStash,
+  applyCarryStash,
+  dropStash,
+  isBareRepo,
 } from "../core/git.js";
 import { loadConfig, resolveWorktreePath } from "../core/config.js";
 import { syncEnvFiles } from "../core/env-sync.js";
 import { recordTargetDirectory } from "../core/shell.js";
+import { detectPackageManager, runPackageInstall } from "../core/deps.js";
+import { executeHook } from "../core/hooks.js";
+import { openInEditor } from "../core/editor.js";
 
 export interface AddOptions {
   base?: string;
   path?: string;
   noEnv?: boolean;
   switch?: boolean;
+  carry?: boolean;
+  install?: boolean;
+  editor?: string;
 }
 
 export async function addCommand(
@@ -42,7 +53,7 @@ export async function addCommand(
       message: "Enter branch name for the new worktree:",
       placeholder: "feat/new-feature",
       validate: (value) => {
-        if (!value.trim()) return "Branch name cannot be empty.";
+        if (!value || !value.trim()) return "Branch name cannot be empty.";
         if (value.includes(" ")) return "Branch name cannot contain spaces.";
       },
     });
@@ -93,13 +104,27 @@ export async function addCommand(
   }
 
   // Resolve target directory
+  const isBare = await isBareRepo(mainRoot);
   const targetPath = options.path
     ? path.resolve(options.path)
-    : resolveWorktreePath(mainRoot, branch, config);
+    : resolveWorktreePath(mainRoot, branch, config, { isBare });
 
   if (fs.existsSync(targetPath)) {
     p.cancel(pc.red(`Target path already exists: ${targetPath}`));
     process.exit(1);
+  }
+
+  // Stash uncommitted changes if --carry is requested
+  let carriedStashSha: string | null = null;
+  if (options.carry) {
+    const sCarry = p.spinner();
+    sCarry.start("Stashing current uncommitted changes to carry over...");
+    carriedStashSha = await createCarryStash(process.cwd());
+    if (carriedStashSha) {
+      sCarry.stop("Stashed uncommitted changes.");
+    } else {
+      sCarry.stop("No uncommitted changes found to carry.");
+    }
   }
 
   const s = p.spinner();
@@ -114,6 +139,14 @@ export async function addCommand(
       cwd: mainRoot,
     });
     s.stop(`Created worktree for ${pc.blue(branch)}`);
+
+    // Ensure internal worktree directory is ignored in .gitignore
+    if (config.location === "internal") {
+      const added = ensureGitignoreEntry(mainRoot, config.internalDir);
+      if (added) {
+        p.log.info(`Added ${pc.dim(config.internalDir + "/")} to .gitignore`);
+      }
+    }
   } catch (err: any) {
     s.stop(pc.red("Failed to create worktree."));
     p.cancel(err.message);
@@ -139,9 +172,68 @@ export async function addCommand(
     }
   }
 
+  // Apply carried stash if one was created
+  if (carriedStashSha) {
+    const sApply = p.spinner();
+    sApply.start("Applying carried changes to the new worktree...");
+    const applyRes = await applyCarryStash(carriedStashSha, targetPath);
+    if (applyRes.success) {
+      await dropStash(carriedStashSha, process.cwd());
+      sApply.stop("Applied carried changes successfully.");
+      p.log.success(
+        pc.green("Carried over all uncommitted changes to your new worktree!")
+      );
+    } else {
+      sApply.stop(pc.yellow("Carried changes resulted in conflicts."));
+      p.log.warn(
+        `Changes are preserved in stash (${carriedStashSha}). You can inspect or apply them manually using:\n  ${pc.cyan(`git -C "${targetPath}" stash apply`)}`
+      );
+    }
+  }
+
+  // Auto dependency installation (--install or config.autoInstall)
+  const shouldInstall = options.install || config.autoInstall;
+  if (shouldInstall) {
+    const pm = detectPackageManager(targetPath);
+    if (pm) {
+      const sDeps = p.spinner();
+      sDeps.start(
+        `Installing dependencies via ${pc.cyan(pm.name)} (${pm.command} ${pm.args.join(" ")})...`
+      );
+      const installRes = await runPackageInstall(targetPath, pm);
+      if (installRes.success) {
+        sDeps.stop(pc.green(`Dependencies installed successfully with ${pm.name}.`));
+      } else {
+        sDeps.stop(pc.yellow(`Package install failed: ${installRes.error}`));
+      }
+    }
+  }
+
+  // Lifecycle hook: postAdd
+  if (config.hooks?.postAdd) {
+    const sHook = p.spinner();
+    sHook.start(`Running postAdd hook: ${pc.dim(config.hooks.postAdd)}...`);
+    const hookRes = await executeHook("postAdd", config.hooks.postAdd, targetPath);
+    if (hookRes.success) {
+      sHook.stop(pc.green("Ran postAdd hook successfully."));
+    } else {
+      sHook.stop(pc.yellow(`postAdd hook failed: ${hookRes.error}`));
+    }
+  }
+
   // Auto switch (default true)
   if (options.switch !== false) {
     recordTargetDirectory(targetPath);
+  }
+
+  // Open in editor if requested (--editor, --code, --cursor, etc.)
+  if (options.editor) {
+    const launch = openInEditor(options.editor, targetPath);
+    if (launch.launched) {
+      p.log.success(`Opened worktree in ${pc.cyan(options.editor)} 🚀`);
+    } else {
+      p.log.warn(`Could not launch editor "${options.editor}": ${launch.error}`);
+    }
   }
 
   p.outro(

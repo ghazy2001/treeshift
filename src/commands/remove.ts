@@ -9,12 +9,15 @@ import {
   deleteBranch,
   getDefaultBranch,
   getUnpushedCommits,
+  getMainRepoRoot,
   type WorktreeInfo,
 } from "../core/git.js";
+import { loadConfig } from "../core/config.js";
+import { executeHook } from "../core/hooks.js";
 
 export async function removeCommand(
   target?: string,
-  options: { force?: boolean; deleteBranch?: boolean } = {}
+  options: { force?: boolean; deleteBranch?: boolean; dryRun?: boolean } = {}
 ): Promise<void> {
   const inRepo = await isGitRepo();
   if (!inRepo) {
@@ -68,6 +71,27 @@ export async function removeCommand(
     return;
   }
 
+  if (selectedWt.isLocked && !options.force) {
+    p.cancel(
+      pc.red(
+        `Cannot remove locked worktree at ${selectedWt.path}${selectedWt.lockReason ? ` (reason: ${selectedWt.lockReason})` : ""}.\nUnlock it first using 'treeshift unlock' or pass --force to override.`
+      )
+    );
+    return;
+  }
+
+  if (options.dryRun) {
+    p.log.info(pc.yellow("[dry-run] Removal preview:"));
+    p.log.message(`  • Worktree path: ${pc.cyan(selectedWt.path)}`);
+    p.log.message(`  • Branch: ${pc.blue(selectedWt.branch || "(detached)")}`);
+    p.log.message(`  • Status: ${selectedWt.isDirty ? pc.yellow("[dirty]") : pc.green("[clean]")}`);
+    if (options.deleteBranch && selectedWt.branch) {
+      p.log.message(`  • Would also delete branch: ${pc.red(selectedWt.branch)}`);
+    }
+    p.outro(pc.cyan("[dry-run] No files or git refs were modified."));
+    return;
+  }
+
   // Check dirty status
   if (selectedWt.isDirty && !options.force) {
     p.log.warn(`Worktree at ${pc.cyan(selectedWt.path)} has uncommitted changes!`);
@@ -81,6 +105,20 @@ export async function removeCommand(
       return;
     }
     options.force = true;
+  }
+
+  const mainRoot = await getMainRepoRoot();
+  const config = loadConfig(mainRoot);
+
+  if (config.hooks?.preRemove) {
+    const sHook = p.spinner();
+    sHook.start(`Running preRemove hook: ${pc.dim(config.hooks.preRemove)}...`);
+    const hookRes = await executeHook("preRemove", config.hooks.preRemove, selectedWt.path);
+    if (hookRes.success) {
+      sHook.stop(pc.green("Ran preRemove hook successfully."));
+    } else {
+      sHook.stop(pc.yellow(`preRemove hook failed: ${hookRes.error}`));
+    }
   }
 
   const s = p.spinner();

@@ -7,12 +7,18 @@ import { recordTargetDirectory } from "../core/shell.js";
 import { addCommand } from "./add.js";
 import { cleanCommand } from "./clean.js";
 import { removeCommand } from "./remove.js";
+import { prCommand } from "./pr.js";
+import { openInEditor } from "../core/editor.js";
 
 const ACTION_NEW = "__ACTION_NEW__";
+const ACTION_PR = "__ACTION_PR__";
 const ACTION_CLEAN = "__ACTION_CLEAN__";
 const ACTION_REMOVE = "__ACTION_REMOVE__";
 
-export async function switchCommand(targetBranch?: string): Promise<void> {
+export async function switchCommand(
+  targetBranch?: string,
+  switchOptions: { editor?: string } = {}
+): Promise<void> {
   const inRepo = await isGitRepo();
   if (!inRepo) {
     p.cancel(pc.red("Not inside a Git repository."));
@@ -34,10 +40,18 @@ export async function switchCommand(targetBranch?: string): Promise<void> {
 
     if (match) {
       if (path.normalize(match.path).toLowerCase() === currentDir) {
+        if (switchOptions.editor) {
+          openInEditor(switchOptions.editor, match.path);
+          p.outro(`Opened in ${pc.cyan(switchOptions.editor)} 🚀`);
+          return;
+        }
         p.log.info(pc.dim("Already inside this worktree."));
         return;
       }
       recordTargetDirectory(match.path);
+      if (switchOptions.editor) {
+        openInEditor(switchOptions.editor, match.path);
+      }
       p.outro(pc.green(`Switched to: ${match.path}`));
       return;
     }
@@ -70,6 +84,11 @@ export async function switchCommand(targetBranch?: string): Promise<void> {
       hint: "branch & workspace",
     },
     {
+      value: ACTION_PR,
+      label: pc.blue("🐙 Mount GitHub Pull Request"),
+      hint: "review or test a PR",
+    },
+    {
       value: ACTION_CLEAN,
       label: pc.yellow("🧹 Clean merged worktrees"),
       hint: "bulk prune merged branches",
@@ -96,6 +115,11 @@ export async function switchCommand(targetBranch?: string): Promise<void> {
     return;
   }
 
+  if (selected === ACTION_PR) {
+    await prCommand();
+    return;
+  }
+
   if (selected === ACTION_CLEAN) {
     await cleanCommand();
     return;
@@ -113,5 +137,8 @@ export async function switchCommand(targetBranch?: string): Promise<void> {
   }
 
   recordTargetDirectory(targetPath);
+  if (switchOptions.editor) {
+    openInEditor(switchOptions.editor, targetPath);
+  }
   p.outro(`${pc.green("Switched to:")} ${pc.cyan(targetPath)}`);
 }

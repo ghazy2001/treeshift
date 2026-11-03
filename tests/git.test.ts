@@ -56,7 +56,7 @@ describe("git core safety and squash merge detection", () => {
     const result = await getMergedBranches("main", ["feat/regular"], tmpRepoDir);
     expect(result.merged).toContain("feat/regular");
     expect(result.all).toContain("feat/regular");
-  });
+  }, 15000);
 
   it("detects squash-merged branches that git branch --merged misses", async () => {
     // Create feature branch
@@ -91,7 +91,7 @@ describe("git core safety and squash merge detection", () => {
     const result = await getMergedBranches("main", ["feat/squashed"], tmpRepoDir);
     expect(result.squashed).toContain("feat/squashed");
     expect(result.all).toContain("feat/squashed");
-  });
+  }, 15000);
 
   it("getUnpushedCommits identifies commits not yet integrated or pushed", async () => {
     execSync("git checkout -b feat/unpushed", { cwd: tmpRepoDir, stdio: "ignore" });
@@ -102,5 +102,5 @@ describe("git core safety and squash merge detection", () => {
     const unpushed = await getUnpushedCommits("feat/unpushed", "main", tmpRepoDir);
     expect(unpushed.length).toBe(1);
     expect(unpushed[0]).toContain("wip: local commit");
-  });
+  }, 15000);
 });

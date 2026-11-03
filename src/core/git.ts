@@ -19,6 +19,14 @@ export interface WorktreeInfo {
     message: string;
     relativeTime: string;
   };
+  aheadBehind?: {
+    ahead: number;
+    behind: number;
+  };
+  statusSummary?: {
+    modified: number;
+    untracked: number;
+  };
 }
 
 export async function runGit(args: string[], cwd: string = process.cwd()): Promise<string> {
@@ -38,6 +46,17 @@ export async function runGit(args: string[], cwd: string = process.cwd()): Promi
 export async function isGitRepo(cwd: string = process.cwd()): Promise<boolean> {
   try {
     const res = await runGit(["rev-parse", "--is-inside-work-tree"], cwd);
+    if (res === "true") return true;
+    const bare = await runGit(["rev-parse", "--is-bare-repository"], cwd);
+    return bare === "true";
+  } catch {
+    return false;
+  }
+}
+
+export async function isBareRepo(cwd: string = process.cwd()): Promise<boolean> {
+  try {
+    const res = await runGit(["rev-parse", "--is-bare-repository"], cwd);
     return res === "true";
   } catch {
     return false;
@@ -136,12 +155,19 @@ export async function listWorktrees(cwd: string = process.cwd()): Promise<Worktr
   }
 
   // Populate dirty status & last commit in parallel
+  const defaultBranch = await getDefaultBranch(cwd).catch(() => "main");
   await Promise.all(
     worktrees.map(async (wt) => {
       if (!fs.existsSync(wt.path)) return;
       try {
-        wt.isDirty = await isWorktreeDirty(wt.path);
+        const summary = await getWorktreeStatusSummary(wt.path);
+        wt.isDirty = summary.isDirty;
+        wt.statusSummary = {
+          modified: summary.modified,
+          untracked: summary.untracked,
+        };
         wt.lastCommit = await getWorktreeCommitInfo(wt.path);
+        wt.aheadBehind = await getAheadBehind(wt.path, wt.branch, defaultBranch);
       } catch {
         // ignore errors for missing or corrupt worktrees
       }
@@ -149,6 +175,67 @@ export async function listWorktrees(cwd: string = process.cwd()): Promise<Worktr
   );
 
   return worktrees;
+}
+
+export async function getAheadBehind(
+  worktreePath: string,
+  branch: string | null,
+  defaultBranch: string = "main"
+): Promise<{ ahead: number; behind: number } | undefined> {
+  if (!branch) return undefined;
+  try {
+    let compareTarget = defaultBranch;
+    try {
+      const upstream = await runGit(
+        ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`],
+        worktreePath
+      );
+      if (upstream) compareTarget = upstream;
+    } catch {
+      // no upstream, fallback to defaultBranch
+    }
+
+    const output = await runGit(
+      ["rev-list", "--left-right", "--count", `${compareTarget}...${branch}`],
+      worktreePath
+    );
+    const parts = output.trim().split(/\s+/);
+    if (parts.length === 2 && parts[0] !== undefined && parts[1] !== undefined) {
+      return {
+        behind: parseInt(parts[0], 10) || 0,
+        ahead: parseInt(parts[1], 10) || 0,
+      };
+    }
+  } catch {
+    // ignore
+  }
+  return undefined;
+}
+
+export async function getWorktreeStatusSummary(
+  worktreePath: string
+): Promise<{ isDirty: boolean; modified: number; untracked: number }> {
+  try {
+    const status = await runGit(["status", "--porcelain"], worktreePath);
+    if (!status) return { isDirty: false, modified: 0, untracked: 0 };
+    const lines = status.split(/\r?\n/).filter(Boolean);
+    let untracked = 0;
+    let modified = 0;
+    for (const line of lines) {
+      if (line.startsWith("??")) {
+        untracked++;
+      } else {
+        modified++;
+      }
+    }
+    return {
+      isDirty: lines.length > 0,
+      modified,
+      untracked,
+    };
+  } catch {
+    return { isDirty: true, modified: 0, untracked: 0 };
+  }
 }
 
 export async function isWorktreeDirty(worktreePath: string): Promise<boolean> {
@@ -250,6 +337,79 @@ export async function removeWorktree(
 
 export async function pruneWorktrees(cwd: string = process.cwd()): Promise<void> {
   await runGit(["worktree", "prune"], cwd);
+}
+
+export async function lockWorktree(
+  worktreePath: string,
+  reason?: string,
+  cwd: string = process.cwd()
+): Promise<void> {
+  const args = ["worktree", "lock"];
+  if (reason && reason.trim()) {
+    args.push("--reason", reason.trim());
+  }
+  args.push(worktreePath);
+  await runGit(args, cwd);
+}
+
+export async function unlockWorktree(
+  worktreePath: string,
+  cwd: string = process.cwd()
+): Promise<void> {
+  await runGit(["worktree", "unlock", worktreePath], cwd);
+}
+
+/**
+ * Creates a carry stash of unstaged, staged, and untracked changes in the current directory.
+ * Returns the stash commit hash if changes were stashed, or null if clean.
+ */
+export async function createCarryStash(cwd: string = process.cwd()): Promise<string | null> {
+  const dirty = await isWorktreeDirty(cwd);
+  if (!dirty) return null;
+
+  const stashMsg = `treeshift-carry-${Date.now()}`;
+  try {
+    await runGit(["stash", "push", "-u", "-m", stashMsg], cwd);
+    const stashSha = await runGit(["rev-parse", "stash@{0}"], cwd);
+    return stashSha;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Applies a carry stash into a target worktree path.
+ */
+export async function applyCarryStash(
+  stashRef: string,
+  targetPath: string
+): Promise<{ success: boolean; conflict: boolean }> {
+  try {
+    await runGit(["stash", "apply", "--index", stashRef], targetPath);
+    return { success: true, conflict: false };
+  } catch {
+    // If --index failed, attempt plain apply
+    try {
+      await runGit(["stash", "apply", stashRef], targetPath);
+      return { success: true, conflict: false };
+    } catch {
+      return { success: false, conflict: true };
+    }
+  }
+}
+
+/**
+ * Drops a specific stash by ref or hash.
+ */
+export async function dropStash(
+  stashRef: string,
+  cwd: string = process.cwd()
+): Promise<void> {
+  try {
+    await runGit(["stash", "drop", stashRef], cwd);
+  } catch {
+    // ignore
+  }
 }
 
 /**
@@ -380,10 +540,93 @@ export async function getUnpushedCommits(
   }
 }
 
+export interface PullRequestDetails {
+  number: number;
+  branch: string;
+  title?: string;
+  author?: string;
+}
+
+export async function fetchPullRequest(
+  prNumber: number,
+  cwd: string = process.cwd()
+): Promise<PullRequestDetails> {
+  const localBranch = `pr/${prNumber}`;
+  let title: string | undefined;
+  let author: string | undefined;
+
+  try {
+    const { stdout } = await execFileAsync(
+      "gh",
+      ["pr", "view", prNumber.toString(), "--json", "title,author"],
+      {
+        cwd,
+        encoding: "utf8",
+      }
+    );
+    const parsed = JSON.parse(stdout);
+    title = parsed.title;
+    author = parsed.author?.login;
+  } catch {
+    // gh CLI not available or not logged in, proceed with native git fetch
+  }
+
+  try {
+    await runGit(
+      ["fetch", "origin", `pull/${prNumber}/head:${localBranch}`, "--force"],
+      cwd
+    );
+  } catch (err: any) {
+    throw new Error(
+      `Failed to fetch PR #${prNumber} from origin. Ensure origin remote exists: ${err.message}`
+    );
+  }
+
+  return {
+    number: prNumber,
+    branch: localBranch,
+    title,
+    author,
+  };
+}
+
 export async function deleteBranch(
   branch: string,
   force: boolean = false,
   cwd: string = process.cwd()
 ): Promise<void> {
   await runGit(["branch", force ? "-D" : "-d", branch], cwd);
+}
+
+/**
+ * Ensures an entry (like .worktrees/) is present in the repository's .gitignore file.
+ * Returns true if the entry was added, false if already present or on error.
+ */
+export function ensureGitignoreEntry(repoRoot: string, entry: string): boolean {
+  try {
+    const gitignorePath = path.join(repoRoot, ".gitignore");
+    const normalizedEntry = entry.replace(/^[\\\/]+|[\\\/]+$/g, "");
+
+    if (fs.existsSync(gitignorePath)) {
+      const content = fs.readFileSync(gitignorePath, "utf8");
+      const lines = content.split(/\r?\n/).map((l) => l.trim());
+      const hasEntry = lines.some((line) => {
+        const cleaned = line.replace(/^[\\\/]+|[\\\/]+$/g, "");
+        return cleaned === normalizedEntry || cleaned === `${normalizedEntry}/`;
+      });
+      if (hasEntry) return false;
+
+      const newContent =
+        content.endsWith("\n") || content.length === 0
+          ? `${content}${normalizedEntry}/\n`
+          : `${content}\n${normalizedEntry}/\n`;
+      fs.writeFileSync(gitignorePath, newContent, "utf8");
+      return true;
+    } else {
+      fs.writeFileSync(gitignorePath, `${normalizedEntry}/\n`, "utf8");
+      return true;
+    }
+  } catch {
+    return false;
+  }
 }

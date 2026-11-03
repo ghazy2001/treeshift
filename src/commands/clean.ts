@@ -10,7 +10,7 @@ import {
   deleteBranch,
 } from "../core/git.js";
 
-export async function cleanCommand(options: { force?: boolean } = {}): Promise<void> {
+export async function cleanCommand(options: { force?: boolean; dryRun?: boolean } = {}): Promise<void> {
   const inRepo = await isGitRepo();
   if (!inRepo) {
     p.cancel(pc.red("Not inside a Git repository."));
@@ -33,13 +33,37 @@ export async function cleanCommand(options: { force?: boolean } = {}): Promise<v
 
   s.stop(`Scanned ${worktrees.length} worktrees against ${pc.cyan(defaultBranch)}.`);
 
-  // Find worktrees associated with merged or squashed branches (exclude main repo)
-  const candidateWorktrees = worktrees.filter(
-    (wt) => !wt.isMain && wt.branch && all.includes(wt.branch)
+  // Find worktrees associated with merged or squashed branches (exclude main repo and locked worktrees)
+  const lockedMerged = worktrees.filter(
+    (wt) => !wt.isMain && wt.branch && all.includes(wt.branch) && wt.isLocked
   );
 
+  const candidateWorktrees = worktrees.filter(
+    (wt) => !wt.isMain && wt.branch && all.includes(wt.branch) && !wt.isLocked
+  );
+
+  if (lockedMerged.length > 0) {
+    p.log.info(
+      pc.yellow(
+        `Skipping ${lockedMerged.length} locked worktree(s). Unlock them first using 'treeshift unlock' if you wish to clean them.`
+      )
+    );
+  }
+
   if (candidateWorktrees.length === 0) {
-    p.outro(pc.green("✨ No merged worktrees found. Your workspace is clean!"));
+    p.outro(pc.green("✨ No merged worktrees found to clean. Your workspace is clean!"));
+    return;
+  }
+
+  if (options.dryRun) {
+    p.log.info(pc.yellow("[dry-run] Found candidate worktrees for cleanup:"));
+    for (const wt of candidateWorktrees) {
+      const isSquashed = squashed.includes(wt.branch!);
+      const mergeTag = isSquashed ? pc.magenta("[squash-merged]") : pc.cyan("[merged]");
+      const dirtyTag = wt.isDirty ? pc.yellow("[dirty]") : pc.green("[clean]");
+      p.log.message(`  • ${pc.blue(wt.branch!)} ${mergeTag} ${dirtyTag} -> ${pc.dim(wt.path)}`);
+    }
+    p.outro(pc.cyan(`[dry-run] ${candidateWorktrees.length} worktree(s) would be cleaned up. No changes were made.`));
     return;
   }
 
